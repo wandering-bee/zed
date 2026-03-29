@@ -1,0 +1,16 @@
+[package]
+name = "zed_i18n"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "GPL-3.0-or-later"
+
+[lib]
+path = "src/zed_i18n.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust-embed = { version = "8", features = ["include-exclude"] }
+parking_lot = "0.12"
+log = "0.4"

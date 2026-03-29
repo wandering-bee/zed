@@ -419,6 +419,7 @@ dependencies = [
  "watch",
  "workspace",
  "zed_actions",
+ "zed_i18n",
 ]
 
 [[package]]
@@ -22204,6 +22205,7 @@ dependencies = [
  "zed-reqwest",
  "zed_actions",
  "zed_env_vars",
+ "zed_i18n",
  "zlog",
  "zlog_settings",
  "ztracing",
@@ -22377,6 +22379,17 @@ name = "zed_html"
 version = "0.3.1"
 dependencies = [
  "zed_extension_api 0.7.0",
+]
+
+[[package]]
+name = "zed_i18n"
+version = "0.1.0"
+dependencies = [
+ "log",
+ "parking_lot",
+ "rust-embed",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

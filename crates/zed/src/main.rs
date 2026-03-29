@@ -326,6 +326,24 @@ fn main() {
     let app =
         Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
 
+    // Initialize i18n with zh-CN as default.
+    // External locale files from ~/.config/zed/locales/ override built-in ones.
+    let i18n_external_dir = paths::config_dir().join("locales");
+    let i18n_report = zed_i18n::init(
+        "zh-CN",
+        if i18n_external_dir.exists() {
+            Some(i18n_external_dir.as_path())
+        } else {
+            None
+        },
+    );
+    log::info!(
+        "i18n: active={}, loaded={} languages, {} errors",
+        i18n_report.active_language,
+        i18n_report.loaded.len(),
+        i18n_report.errors.len(),
+    );
+
     let app_db = db::AppDatabase::new();
     let system_id = app.background_executor().spawn(system_id());
     let installation_id = app

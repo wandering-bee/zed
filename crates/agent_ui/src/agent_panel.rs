@@ -579,7 +579,7 @@ impl AgentType {
 
     fn label(&self) -> SharedString {
         match self {
-            Self::NativeAgent | Self::TextThread => "Zed Agent".into(),
+            Self::NativeAgent | Self::TextThread => zed_i18n::t("Zed Agent").to_string().into(),
             Self::Custom { id, .. } => id.0.clone(),
         }
     }
@@ -3756,7 +3756,7 @@ impl AgentPanel {
                             if !thread.is_empty() {
                                 let session_id = thread.id().clone();
                                 this.item(
-                                    ContextMenuEntry::new("New From Summary")
+                                    ContextMenuEntry::new(zed_i18n::t("New From Summary").to_string())
                                         .icon(IconName::ThreadFromSummary)
                                         .icon_color(Color::Muted)
                                         .handler(move |window, cx| {
@@ -3773,7 +3773,7 @@ impl AgentPanel {
                             }
                         })
                         .item(
-                            ContextMenuEntry::new("Zed Agent")
+                            ContextMenuEntry::new(zed_i18n::t("Zed Agent").to_string())
                                 .when(
                                     is_agent_selected(AgentType::NativeAgent)
                                         | is_agent_selected(AgentType::TextThread),
@@ -3807,7 +3807,7 @@ impl AgentPanel {
                                 }),
                         )
                         .item(
-                            ContextMenuEntry::new("Text Thread")
+                            ContextMenuEntry::new(zed_i18n::t("Text Thread").to_string())
                                 .action(NewTextThread.boxed_clone())
                                 .icon(IconName::TextThread)
                                 .icon_color(Color::Muted)
@@ -3863,7 +3863,7 @@ impl AgentPanel {
                                 .collect::<Vec<_>>();
 
                             if !agent_items.is_empty() {
-                                menu = menu.separator().header("External Agents");
+                                menu = menu.separator().header(zed_i18n::t("External Agents").to_string());
                             }
                             for item in &agent_items {
                                 let mut entry = ContextMenuEntry::new(item.display_name.clone());
@@ -3926,7 +3926,7 @@ impl AgentPanel {
                         })
                         .separator()
                         .item(
-                            ContextMenuEntry::new("Add More Agents")
+                            ContextMenuEntry::new(zed_i18n::t("Add More Agents").to_string())
                                 .icon(IconName::Plus)
                                 .icon_color(Color::Muted)
                                 .handler({
@@ -4041,7 +4041,7 @@ impl AgentPanel {
                 .trigger_with_tooltip(agent_selector_button, {
                     move |_window, cx| {
                         Tooltip::for_action_in(
-                            "New Thread…",
+                            zed_i18n::t("New Thread…").to_string(),
                             &ToggleNewThreadMenu,
                             &focus_handle,
                             cx,
@@ -4110,7 +4110,7 @@ impl AgentPanel {
                     {
                         move |_window, cx| {
                             Tooltip::for_action_in(
-                                "New Thread\u{2026}",
+                                zed_i18n::t("New Thread…").to_string(),
                                 &ToggleNewThreadMenu,
                                 &focus_handle,
                                 cx,

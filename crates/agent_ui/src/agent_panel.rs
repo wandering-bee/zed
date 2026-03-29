@@ -746,6 +746,8 @@ pub struct AgentPanel {
     pending_serialization: Option<Task<Result<()>>>,
     onboarding: Entity<AgentPanelOnboarding>,
     selected_agent_type: AgentType,
+    per_agent_views: HashMap<AgentId, Entity<ConversationView>>,
+    general_view: Option<Entity<ConversationView>>,
     start_thread_in: StartThreadIn,
     worktree_creation_status: Option<WorktreeCreationStatus>,
     _thread_view_subscription: Option<Subscription>,
@@ -1079,6 +1081,8 @@ impl AgentPanel {
             text_thread_history,
             thread_store,
             selected_agent_type: AgentType::default(),
+            per_agent_views: HashMap::default(),
+            general_view: None,
             start_thread_in: StartThreadIn::default(),
             worktree_creation_status: None,
             _thread_view_subscription: None,
@@ -1230,6 +1234,8 @@ impl AgentPanel {
     fn new_text_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         telemetry::event!("Agent Thread Started", agent = "zed-text");
 
+        self.save_current_view(cx);
+
         let context = self
             .text_thread_store
             .update(cx, |context_store, cx| context_store.create(cx));
@@ -1295,6 +1301,17 @@ impl AgentPanel {
 
         let thread_store = self.thread_store.clone();
         let kvp = KeyValueStore::global(cx);
+
+        // When no explicit agent is given, derive from the current tab/selected
+        // agent type so that all entry points (actions, prompts, etc.) respect
+        // the active tab context.
+        let agent_choice = agent_choice.or_else(|| {
+            match &self.selected_agent_type {
+                AgentType::Custom { id } => Some(crate::Agent::Custom { id: id.clone() }),
+                AgentType::NativeAgent => Some(crate::Agent::NativeAgent),
+                AgentType::TextThread => None, // fall through to KVP lookup
+            }
+        });
 
         if let Some(agent) = agent_choice {
             cx.background_spawn({
@@ -1526,6 +1543,8 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.save_current_view(cx);
+
         let lsp_adapter_delegate = make_lsp_adapter_delegate(&self.project.clone(), cx)
             .log_err()
             .flatten();
@@ -2414,7 +2433,14 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let target_agent_type = AgentType::from(agent.clone());
+
         if let Some(conversation_view) = self.background_threads.remove(&session_id) {
+            self.save_current_view(cx);
+            if self.selected_agent_type != target_agent_type {
+                self.selected_agent_type = target_agent_type;
+                self.serialize(cx);
+            }
             self.set_active_view(
                 ActiveView::AgentThread { conversation_view },
                 focus,
@@ -2431,6 +2457,10 @@ impl AgentPanel {
                 .map(|t| t.read(cx).id.clone())
                 == Some(session_id.clone())
             {
+                if self.selected_agent_type != target_agent_type {
+                    self.selected_agent_type = target_agent_type;
+                    self.serialize(cx);
+                }
                 cx.emit(AgentPanelEvent::ActiveViewChanged);
                 return;
             }
@@ -2443,6 +2473,11 @@ impl AgentPanel {
                 .map(|t| t.read(cx).id.clone())
                 == Some(session_id.clone())
             {
+                self.save_current_view(cx);
+                if self.selected_agent_type != target_agent_type {
+                    self.selected_agent_type = target_agent_type;
+                    self.serialize(cx);
+                }
                 let view = self.previous_view.take().unwrap();
                 self.set_active_view(view, focus, window, cx);
                 return;
@@ -2475,6 +2510,10 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Save the current view before switching to a new thread, so tab
+        // restoration always has the latest conversation for each slot.
+        self.save_current_view(cx);
+
         let selected_agent = AgentType::from(ext_agent.clone());
         if self.selected_agent_type != selected_agent {
             self.selected_agent_type = selected_agent;
@@ -2520,12 +2559,120 @@ impl AgentPanel {
         })
         .detach();
 
+        if let AgentType::Custom { id } = &self.selected_agent_type {
+            self.per_agent_views
+                .insert(id.clone(), conversation_view.clone());
+        } else {
+            self.general_view = Some(conversation_view.clone());
+        }
+
         self.set_active_view(
             ActiveView::AgentThread { conversation_view },
             focus,
             window,
             cx,
         );
+    }
+
+    /// Derives the active tab from `selected_agent_type`. No separate state to sync.
+    /// Returns Some(id) for external agents, None for NativeAgent.
+    /// TextThread is its own state and does not correspond to any tab.
+    fn active_agent_tab(&self) -> Option<&AgentId> {
+        match &self.selected_agent_type {
+            AgentType::Custom { id } => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Whether the General tab should be visually selected.
+    /// True only when the active agent is NativeAgent (not TextThread).
+    fn is_general_tab_active(&self) -> bool {
+        matches!(self.selected_agent_type, AgentType::NativeAgent)
+    }
+
+    /// Saves the current conversation view into the appropriate slot before switching.
+    fn save_current_view(&mut self, _cx: &App) {
+        if let ActiveView::AgentThread { conversation_view } = &self.active_view {
+            match &self.selected_agent_type {
+                AgentType::Custom { id } => {
+                    self.per_agent_views
+                        .insert(id.clone(), conversation_view.clone());
+                }
+                _ => {
+                    self.general_view = Some(conversation_view.clone());
+                }
+            }
+        }
+    }
+
+    /// Removes a conversation view from background_threads if it matches by session id.
+    fn remove_from_background(&mut self, view: &Entity<ConversationView>, cx: &App) {
+        if let Some(thread_view) = view.read(cx).root_thread(cx) {
+            self.background_threads.remove(&thread_view.read(cx).id);
+        }
+    }
+
+    fn switch_to_agent_tab(
+        &mut self,
+        agent_id: AgentId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.active_agent_tab() == Some(&agent_id) {
+            return;
+        }
+
+        self.save_current_view(cx);
+
+        let target_agent_type = AgentType::Custom {
+            id: agent_id.clone(),
+        };
+
+        if let Some(existing_view) = self.per_agent_views.get(&agent_id).cloned() {
+            self.remove_from_background(&existing_view, cx);
+            self.selected_agent_type = target_agent_type;
+            self.serialize(cx);
+            self.set_active_view(
+                ActiveView::AgentThread {
+                    conversation_view: existing_view,
+                },
+                true,
+                window,
+                cx,
+            );
+        } else {
+            self.new_agent_thread(target_agent_type, window, cx);
+        }
+    }
+
+    fn switch_to_general_tab(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // General = not on any Custom agent tab.
+        // Allow switching even from TextThread state.
+        if matches!(self.selected_agent_type, AgentType::NativeAgent) {
+            return;
+        }
+
+        self.save_current_view(cx);
+
+        if let Some(existing_view) = self.general_view.clone() {
+            self.remove_from_background(&existing_view, cx);
+            self.selected_agent_type = AgentType::NativeAgent;
+            self.serialize(cx);
+            self.set_active_view(
+                ActiveView::AgentThread {
+                    conversation_view: existing_view,
+                },
+                true,
+                window,
+                cx,
+            );
+        } else {
+            self.new_agent_thread(AgentType::NativeAgent, window, cx);
+        }
     }
 
     fn active_thread_has_messages(&self, cx: &App) -> bool {
@@ -3700,6 +3847,118 @@ impl AgentPanel {
             })
     }
 
+    fn render_agent_tabs(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+        let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let store = agent_server_store.read(cx);
+        let registry_store = project::AgentRegistryStore::try_global(cx);
+        let registry_store_ref = registry_store.as_ref().map(|s| s.read(cx));
+
+        let agent_items: Vec<(AgentId, SharedString, Option<SharedString>)> = store
+            .external_agents()
+            .map(|agent_id| {
+                let label = store
+                    .agent_display_name(agent_id)
+                    .or_else(|| {
+                        registry_store_ref
+                            .as_ref()
+                            .and_then(|s| s.agent(agent_id))
+                            .map(|a| a.name().clone())
+                    })
+                    .unwrap_or_else(|| agent_id.0.clone());
+                let icon = store.agent_icon(agent_id);
+                (agent_id.clone(), label, icon)
+            })
+            .sorted_unstable_by_key(|(_, name, _)| name.to_lowercase())
+            .collect();
+
+        if agent_items.is_empty() {
+            return None;
+        }
+
+        let active_tab = self.active_agent_tab();
+        let is_general_selected = self.is_general_tab_active();
+
+        let general_tab = h_flex()
+            .id("agent-tab-general")
+            .px_3()
+            .py_1()
+            .gap_1p5()
+            .cursor_pointer()
+            .border_b_2()
+            .when(is_general_selected, |this| {
+                this.border_color(cx.theme().colors().text_accent)
+                    .bg(cx.theme().colors().tab_active_background)
+            })
+            .when(!is_general_selected, |this| {
+                this.border_color(gpui::transparent_black())
+                    .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+            })
+            .child(
+                Label::new("General")
+                    .size(LabelSize::Small)
+                    .when(is_general_selected, |l| l.color(Color::Accent))
+                    .when(!is_general_selected, |l| l.color(Color::Muted)),
+            )
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.switch_to_general_tab(window, cx);
+            }));
+
+        let tab_bar = h_flex()
+            .id("agent-tabs-bar")
+            .w_full()
+            .flex_none()
+            .gap_0()
+            .bg(cx.theme().colors().tab_bar_background)
+            .border_b_1()
+            .border_color(cx.theme().colors().border)
+            .overflow_x_scroll()
+            .child(general_tab);
+
+        let tab_bar = agent_items.into_iter().fold(tab_bar, |bar, (id, name, icon_path)| {
+            let is_selected = active_tab == Some(&id);
+
+            let tab = h_flex()
+                .id(SharedString::from(format!("agent-tab-{}", id.0)))
+                .px_3()
+                .py_1()
+                .gap_1p5()
+                .cursor_pointer()
+                .border_b_2()
+                .when(is_selected, |this| {
+                    this.border_color(cx.theme().colors().text_accent)
+                        .bg(cx.theme().colors().tab_active_background)
+                })
+                .when(!is_selected, |this| {
+                    this.border_color(gpui::transparent_black())
+                        .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
+                })
+                .when_some(icon_path, |this, path| {
+                    this.child(
+                        Icon::from_external_svg(path)
+                            .size(IconSize::Small)
+                            .when(is_selected, |i| i.color(Color::Accent))
+                            .when(!is_selected, |i| i.color(Color::Muted)),
+                    )
+                })
+                .child(
+                    Label::new(name)
+                        .size(LabelSize::Small)
+                        .when(is_selected, |l| l.color(Color::Accent))
+                        .when(!is_selected, |l| l.color(Color::Muted)),
+                )
+                .on_click(cx.listener({
+                    let agent_id = id.clone();
+                    move |this, _, window, cx| {
+                        this.switch_to_agent_tab(agent_id.clone(), window, cx);
+                    }
+                }));
+
+            bar.child(tab)
+        });
+
+        Some(tab_bar)
+    }
+
     fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
         let has_visible_worktrees = self.project.read(cx).visible_worktrees(cx).next().is_some();
@@ -3743,6 +4002,7 @@ impl AgentPanel {
 
             let focus_handle = focus_handle.clone();
             let agent_server_store = agent_server_store;
+            let active_agent_tab = self.active_agent_tab().cloned();
 
             Rc::new(move |window, cx| {
                 telemetry::event!("New Thread Clicked");
@@ -3844,6 +4104,12 @@ impl AgentPanel {
 
                             let agent_items = agent_server_store
                                 .external_agents()
+                                .filter(|agent_id| {
+                                    match &active_agent_tab {
+                                        Some(tab_id) => *agent_id == tab_id,
+                                        None => true,
+                                    }
+                                })
                                 .map(|agent_id| {
                                     let display_name = agent_server_store
                                         .agent_display_name(agent_id)
@@ -4642,6 +4908,7 @@ impl Render for AgentPanel {
                     })
                 }
             }))
+            .children(self.render_agent_tabs(cx))
             .child(self.render_toolbar(window, cx))
             .children(self.render_workspace_trust_message(cx))
             .children(self.render_onboarding(window, cx))
